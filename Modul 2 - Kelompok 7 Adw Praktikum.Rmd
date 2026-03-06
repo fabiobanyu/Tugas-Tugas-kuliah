@@ -1,0 +1,376 @@
+# Modul 2: Praktikum ADW
+
+### Load Data & Library
+
+```{r}
+library(forecast)
+library(ggplot2)
+library(dplyr)
+library(zoo)
+library(tseries)
+library(Metrics)
+```
+
+**Penjelasan:**
+
+Library yang digunakan adalah `forecast` untuk pemodelan, `ggplot2` untuk visualisasi, `dplyr` untuk manipulasi data, `zoo` untuk imputasi, `tseries` untuk uji stasioneritas, dan `Metrics` untuk evaluasi model.
+
+### Pre-Processing
+
+```{r}
+oil <- read.csv("https://raw.githubusercontent.com/fabiobanyu/Tugas-Tugas-kuliah/main/oil.csv", stringsAsFactors = FALSE)
+
+str(oil)
+head(oil, 10)
+tail(oil, 10)
+```
+
+```{r}
+colnames(oil) <- c("date", "price")
+oil$date <- as.Date(oil$date)
+
+# Cek missing values
+cat("Jumlah NA:", sum(is.na(oil$price)), "\n")
+cat("Total baris:", nrow(oil), "\n")
+```
+
+```{r}
+# Imputasi NA
+oil$price <- na.approx(oil$price, na.rm = FALSE)
+
+# setelah imputasi
+cat("Jumlah NA setelah imputasi:", sum(is.na(oil$price)), "\n")
+
+oil <- oil[!is.na(oil$price), ]
+cat("Total baris bersih:", nrow(oil), "\n")
+```
+
+**Penjelasan:**
+
+Data oil.csv dibaca dan diperiksa strukturnya, ditemukan 43 nilai NA pada kolom harga. NA diisi menggunakan interpolasi linear (`na.approx`), menyisakan 1 NA di awal yang kemudian dihapus, sehingga data bersih menjadi 1217 baris.
+
+### Plot Data Harian
+
+```{r}
+# Plot data harga minyak
+ggplot(oil, aes(x = date, y = price)) +
+  geom_line(color = "steelblue", linewidth = 0.7) +
+  labs(
+    title = "Harga Minyak Mentah WTI (2013–2017)",
+    subtitle = "Sumber: Kaggle Store Sales Dataset",
+    x = "Tanggal",
+    y = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+Data divisualisasikan sebagai line chart harian. Terlihat harga minyak berada di kisaran \$90–\$105 pada 2013–2014, lalu anjlok drastis ke \~\$30 pada 2016, kemudian stabil di kisaran \$45–\$55 hingga 2017.
+
+```{r}
+# Agregasi ke rata-rata bulanan agar lebih smooth & representatif
+oil_monthly <- oil %>%
+  mutate(
+    year  = format(date, "%Y"),
+    month = format(date, "%m")
+  ) %>%
+  group_by(year, month) %>%
+  summarise(avg_price = mean(price, na.rm = TRUE), .groups = "drop") %>%
+  arrange(year, month)
+
+cat("Jumlah bulan:", nrow(oil_monthly), "\n")
+head(oil_monthly)
+```
+
+### Agregasi Bulanan & Konversi ts
+
+```{r}
+# Data mulai Januari 2013, frekuensi 12 (bulanan)
+oil_ts <- ts(oil_monthly$avg_price,
+             start     = c(2013, 1),
+             frequency = 12)
+
+# Plot time series bulanan
+autoplot(oil_ts) +
+  labs(
+    title = "Rata-rata Harga Minyak WTI Bulanan",
+    x     = "Tahun",
+    y     = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+Data harian diagregasi menjadi rata-rata bulanan menghasilkan 56 titik waktu, lalu dikonversi ke objek `ts` dengan frekuensi 12. Ini dilakukan agar data lebih stabil dan cocok untuk metode smoothing bulanan.
+
+### Dekomposisi STL, ACF & PACF, Uji ADF
+
+```{r}
+oil_decomp <- stl(oil_ts, s.window = "periodic")
+autoplot(oil_decomp) +
+  labs(title = "Dekomposisi STL - Harga Minyak WTI") +
+  theme_minimal()
+
+par(mfrow = c(1, 2))
+acf(oil_ts,  main = "ACF - Harga Minyak WTI")
+pacf(oil_ts, main = "PACF - Harga Minyak WTI")
+par(mfrow = c(1, 1))
+
+adf_result <- adf.test(oil_ts)
+cat("\n===== UJI ADF (Augmented Dickey-Fuller) =====\n")
+print(adf_result)
+if (adf_result$p.value < 0.05) {
+  cat("Kesimpulan: Data STASIONER (p < 0.05)\n")
+} else {
+  cat("Kesimpulan: Data TIDAK STASIONER (p >= 0.05)\n")
+}
+```
+
+**Penjelasan:**
+
+**STL**
+
+STL memisahkan data menjadi tiga komponen: tren, musiman, dan residual. Hasilnya menunjukkan tren menurun tajam sejak 2014, komponen musiman lemah (amplitude ±5), dan residual yang relatif kecil.
+
+**ACF & PACF**
+
+ACF menunjukkan pola peluruhan lambat (slowly decaying), artinya data sangat autokorelasi dan memiliki tren. PACF hanya signifikan di lag pertama, mengindikasikan struktur AR(1).
+
+**Uji ADF**
+
+Uji Augmented Dickey-Fuller menghasilkan p-value = 0.743 (\> 0.05), sehingga gagal tolak H₀. Artinya data **tidak stasioner** — terdapat tren jangka panjang yang perlu ditangani oleh metode smoothing.
+
+### Split Train/Test
+
+```{r}
+# 80% training, 20% testing
+n_total <- length(oil_ts)
+n_train  <- round(0.8 * n_total)
+n_test   <- n_total - n_train
+
+cat("\nTotal data:", n_total, "bulan\n")
+cat("Training  :", n_train,  "bulan\n")
+cat("Testing   :", n_test,   "bulan\n")
+
+oil_train <- head(oil_ts, n_train)
+oil_test  <- tail(oil_ts, n_test)
+```
+
+**Penjelasan:**
+
+Data dibagi 80% training (45 bulan: Jan 2013 – Sep 2016) dan 20% testing (11 bulan: Okt 2016 – Ags 2017). Pemisahan ini untuk mengevaluasi kemampuan prediksi model pada data yang belum pernah dilihat.
+
+### Model SES
+
+```{r}
+cat("\n===== MODEL 1: SES (Simple Exponential Smoothing) =====\n")
+
+model_ses <- ses(oil_train, h = n_test)
+summary(model_ses)
+
+cat("Alpha (α) optimal:", model_ses$model$par["alpha"], "\n")
+
+# Plot SES
+autoplot(model_ses) +
+  autolayer(oil_test, series = "Aktual", color = "red") +
+  labs(
+    title = "SES - Peramalan Harga Minyak WTI",
+    x     = "Tahun",
+    y     = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+Penjelasan:
+
+SES menghasilkan α = 0.9999 (sangat tinggi), artinya model hampir sepenuhnya bergantung pada nilai terbaru dan mengabaikan data lama. Hasilnya forecast datar di \~45.16 untuk semua periode karena SES tidak menangkap tren.
+
+### Model Holt
+
+```{r}
+cat("\n===== MODEL 2: HOLT (Double Exponential Smoothing) =====\n")
+
+model_holt <- holt(oil_train, h = n_test)
+summary(model_holt)
+
+cat("Alpha (α) optimal:", model_holt$model$par["alpha"], "\n")
+cat("Beta  (β) optimal:", model_holt$model$par["beta"],  "\n")
+
+# Plot Holt
+autoplot(model_holt) +
+  autolayer(oil_test, series = "Aktual", color = "red") +
+  labs(
+    title = "Holt - Peramalan Harga Minyak WTI",
+    x     = "Tahun",
+    y     = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+Holt menghasilkan α = 0.9999 dan β = 0.56, menunjukkan model responsif terhadap perubahan level sekaligus menangkap tren. Forecast sedikit menanjak (\~45.2 hingga \~45.85) karena komponen tren positif kecil terdeteksi di akhir data training.
+
+### Model Holt-Winters Additive
+
+```{r}
+cat("\n===== MODEL 3: HOLT-WINTERS (Triple Exponential Smoothing) =====\n")
+
+# Additive
+model_hw_add <- hw(oil_train, seasonal = "additive",   h = n_test)
+
+# Multiplicative
+model_hw_mul <- hw(oil_train, seasonal = "multiplicative", h = n_test)
+
+summary(model_hw_add)
+summary(model_hw_mul)
+
+# Plot Holt-Winters Additive
+autoplot(model_hw_add) +
+  autolayer(oil_test, series = "Aktual", color = "red") +
+  labs(
+    title = "Holt-Winters Additive - Peramalan Harga Minyak WTI",
+    x     = "Tahun",
+    y     = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+HW Additive menghasilkan γ = 0.0001 (komponen musiman nyaris nol), menunjukkan tidak ada musiman yang signifikan. Forecast justru menurun drastis ke \~24–42 karena pola musiman historis (yang lemah) salah diinterpretasikan sebagai tren turun.
+
+### Model Holt-Winters Multiplicative
+
+```{r}
+# Plot Holt-Winters Multiplicative
+autoplot(model_hw_mul) +
+  autolayer(oil_test, series = "Aktual", color = "red") +
+  labs(
+    title = "Holt-Winters Multiplicative - Peramalan Harga Minyak WTI",
+    x     = "Tahun",
+    y     = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+HW Multiplicative menghasilkan α = 0.667, β = 0.157, γ = 0.124 — lebih seimbang. Forecast berkisar \~36–46, lebih masuk akal dari HW Additive, namun tetap kalah akurat dibanding Holt karena memaksakan komponen musiman yang sebenarnya tidak dominan.
+
+### Evaluasi Model
+
+```{r}
+# Fungsi evaluasi
+eval_model <- function(actual, predicted, model_name) {
+  mae_val  <- mae(actual, predicted)
+  rmse_val <- rmse(actual, predicted)
+  mape_val <- mape(actual, predicted) * 100  # dalam persen
+  cat(sprintf("\n[%s]\n  MAE  = %.4f\n  RMSE = %.4f\n  MAPE = %.4f%%\n",
+              model_name, mae_val, rmse_val, mape_val))
+  return(data.frame(Model = model_name,
+                    MAE   = round(mae_val,  4),
+                    RMSE  = round(rmse_val, 4),
+                    MAPE  = round(mape_val, 4)))
+}
+
+aktual <- as.numeric(oil_test)
+
+cat("\n===== EVALUASI PERFORMA MODEL =====\n")
+eval_ses    <- eval_model(aktual, as.numeric(model_ses$mean),    "SES")
+eval_holt   <- eval_model(aktual, as.numeric(model_holt$mean),   "Holt")
+eval_hw_add <- eval_model(aktual, as.numeric(model_hw_add$mean), "Holt-Winters Additive")
+eval_hw_mul <- eval_model(aktual, as.numeric(model_hw_mul$mean), "Holt-Winters Multiplicative")
+```
+
+**Penjelasan:**
+
+Keempat model dibandingkan menggunakan MAE, RMSE, dan MAPE pada data testing. Holt unggul dengan MAPE 7.565%, diikuti SES 8.121%, HW Multiplicative 14.001%, dan HW Additive 29.030% — HW Additive paling buruk karena salah menangkap pola musiman.
+
+### Tabel perbandingan
+
+```{r}
+# Tabel perbandingan
+tabel_eval <- rbind(eval_ses, eval_holt, eval_hw_add, eval_hw_mul)
+cat("\n===== TABEL PERBANDINGAN MODEL =====\n")
+print(tabel_eval)
+
+# Model terbaik (MAPE terkecil)
+best_model <- tabel_eval[which.min(tabel_eval$MAPE), "Model"]
+cat("\n>>> Model terbaik berdasarkan MAPE:", best_model, "<<<\n")
+
+
+ggplot(tabel_eval, aes(x = Model, y = MAPE, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.6, show.legend = FALSE) +
+  geom_text(aes(label = paste0(MAPE, "%")), vjust = -0.5, size = 4) +
+  labs(
+    title = "Perbandingan MAPE Antar Model Smoothing",
+    x     = "Model",
+    y     = "MAPE (%)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```
+
+**Penjelasan:**
+
+Berdasarkan hasil output, Model Holt adalah yang terbaik dengan MAPE 7.565% — artinya tingkat akurasi peramalan tergolong baik (MAPE \< 10%). Model ini cocok karena data harga minyak memiliki tren menurun tanpa pola musiman yang dominan, sehingga Holt (yang menangkap tren) lebih unggul dari HW yang memaksakan komponen musiman.
+
+### Forecast 12 Bulan ke Depan
+
+```{r}
+# REFIT semua mode
+n_forecast <- 12
+
+refit_ses    <- ses(oil_ts, h = n_forecast)
+refit_holt   <- holt(oil_ts, h = n_forecast)
+refit_hw_add <- hw(oil_ts, seasonal = "additive",      h = n_forecast)
+refit_hw_mul <- hw(oil_ts, seasonal = "multiplicative", h = n_forecast)
+
+cat("\n===== HASIL PERAMALAN 12 BULAN KE DEPAN =====\n")
+cat("(Refit menggunakan seluruh data 2013-2017)\n")
+cat("\n[SES]\n");               print(refit_ses$mean)
+cat("\n[Holt]\n");              print(refit_holt$mean)
+cat("\n[HW Additive]\n");       print(refit_hw_add$mean)
+cat("\n[HW Multiplicative]\n"); print(refit_hw_mul$mean)
+
+# Plot peramalan model terbaik
+if (best_model == "Holt") {
+  model_final       <- refit_holt
+} else if (best_model == "SES") {
+  model_final       <- refit_ses
+} else if (best_model == "Holt-Winters Additive") {
+  model_final       <- refit_hw_add
+} else {
+  model_final       <- refit_hw_mul
+}
+
+autoplot(model_final) +
+  labs(
+    title    = paste("Peramalan 12 Bulan ke Depan -", best_model),
+    subtitle = "Menggunakan seluruh data historis (2013–2017)",
+    x        = "Tahun",
+    y        = "Harga (USD/barrel)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+**Penjelasan:**
+
+Semua model di-refit menggunakan seluruh data (56 bulan) lalu meramalkan Sep 2017 – Ags 2018. Model Holt meramalkan harga stabil di kisaran \~47–48 USD/barrel dengan interval kepercayaan yang melebar seiring waktu.
+
+### Hasil dan Kesimpulan
+
+```{r}
+cat("\n")
+cat("============================================================\n")
+cat("  RINGKASAN HASIL ANALISIS DERET WAKTU\n")
+cat("  Dataset : Harga Minyak WTI (oil.csv)\n")
+cat("  Periode : Januari 2013 - Agustus 2017\n")
+cat("============================================================\n")
+cat("\nTabel Evaluasi Model:\n")
+print(tabel_eval)
+cat("\nModel Terbaik:", best_model, "\n")
+```
